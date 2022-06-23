@@ -17,18 +17,23 @@
 package stats
 
 import (
-	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/montanaflynn/stats"
 )
 
+type Report struct {
+	QPS         int64
+	LatencyP99  float64 // ms
+	LatencyP999 float64 // ms
+}
+
 // 计数器
 type Counter struct {
-	Total  int64   // 总调用次数(limiter)
-	Failed int64   // 失败次数
-	costs  []int64 // 耗时统计
+	Total  int64     // 总调用次数(limiter)
+	Failed int64     // 失败次数
+	costs  []float64 // 耗时统计
 }
 
 func NewCounter() *Counter {
@@ -36,34 +41,28 @@ func NewCounter() *Counter {
 }
 
 func (c *Counter) Reset(total int64) {
-	atomic.StoreInt64(&c.Total, 0)
-	atomic.StoreInt64(&c.Failed, 0)
-	c.costs = make([]int64, total)
+	c.Total = total
+	c.Failed = 0
+	c.costs = make([]float64, total)
 }
 
 func (c *Counter) AddRecord(idx int64, err error, cost int64) {
-	c.costs[idx] = cost
+	c.costs[idx] = float64(cost)
 	if err != nil {
 		atomic.AddInt64(&c.Failed, 1)
 	}
 }
 
-// idx < 0 表示用尽
 func (c *Counter) Idx() (idx int64) {
-	return atomic.AddInt64(&c.Total, 1) - 1
+	idx = atomic.AddInt64(&c.Total, 1) - 1
+	if idx < 0 {
+		panic("counter index overflow")
+	}
+	return idx
 }
 
-func (c *Counter) Report(title string, totalns int64, concurrent int, total int64, echoSize int) error {
-	ms, sec := int64(time.Millisecond), int64(time.Second)
-	logInfo("[%s]: finish benching [%s], took %d ms for %d requests", title, time.Now().String(), totalns/ms, c.Total)
-	logInfo("[%s]: requests total: %d, failed: %d", title, c.Total, c.Failed)
-
-	var tps float64
-	if totalns < sec {
-		tps = float64(c.Total*sec) / float64(totalns)
-	} else {
-		tps = float64(c.Total) / (float64(totalns) / float64(sec))
-	}
+func (c *Counter) Report(duration int64) Report {
+	qps := float64(c.Total) / float64(duration) * float64(time.Second)
 
 	costs := make([]float64, len(c.costs))
 	for i := range c.costs {
@@ -72,23 +71,9 @@ func (c *Counter) Report(title string, totalns int64, concurrent int, total int6
 	tp99, _ := stats.Percentile(costs, 99)
 	tp999, _ := stats.Percentile(costs, 99.9)
 
-	var result string
-	if tp999/1000 < 1 {
-		result = fmt.Sprintf("[%s]: TPS: %.2f, TP99: %.2fus, TP999: %.2fus (b=%d Byte, c=%d, n=%d)",
-			title, tps, tp99/1000, tp999/1000, echoSize, concurrent, total)
-	} else {
-		result = fmt.Sprintf("[%s]: TPS: %.2f, TP99: %.2fms, TP999: %.2fms (b=%d Byte, c=%d, n=%d)",
-			title, tps, tp99/1000000, tp999/1000000, echoSize, concurrent, total)
+	return Report{
+		QPS:         int64(qps),
+		LatencyP99:  tp99 / float64(time.Millisecond),
+		LatencyP999: tp999 / float64(time.Millisecond),
 	}
-	logInfo(result)
-	return nil
-}
-
-const blueLayout = "\x1B[1;36;40m%s\x1B[0m"
-
-var infoTitle = "Info: "
-
-func logInfo(format string, a ...interface{}) {
-	s := fmt.Sprintf(format, a...)
-	fmt.Println(infoTitle + s)
 }
